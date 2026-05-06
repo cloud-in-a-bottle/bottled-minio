@@ -25,15 +25,24 @@
 FROM minio/minio:latest AS minio-source
 
 # Stage 2: build the runtime image.
-FROM debian:bookworm-slim
+#
+# Why python:3.13-slim instead of debian:bookworm-slim?  In
+# practice debian:bookworm-slim trips a "unknown version specified"
+# error from podman+crun on at least some OpenHost deploy hosts
+# (the bookworm base is too old to handle the OCI runtime
+# protocol the host's crun emits).  python:3.13-slim is a very
+# small newer-Debian-trixie image with bash + apt + ca-certs +
+# coreutils preinstalled, so we get past the build hurdle without
+# adding meaningful image size; the Python runtime is unused but
+# the layer is small and we tolerate it for portability across
+# operator hosts.
+FROM python:3.13-slim
 
 # -- system deps ------------------------------------------------
-# bash for start.sh, coreutils + curl for the first-boot
-# credential generator and operator inspection.  ca-certificates
-# so MinIO can talk over TLS to anything it federates with.
+# curl for first-boot operator inspection / probes.  bash, coreutils,
+# and ca-certificates are already in the python:3.13-slim base.
 RUN apt-get update -qq \
- && apt-get install -y --no-install-recommends \
-      bash coreutils curl ca-certificates \
+ && apt-get install -y --no-install-recommends curl \
  && rm -rf /var/lib/apt/lists/*
 
 # -- minio + mc -------------------------------------------------
