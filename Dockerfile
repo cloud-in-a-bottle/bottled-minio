@@ -26,24 +26,15 @@ FROM minio/minio:latest AS minio-source
 
 # Stage 2: build the runtime image.
 #
-# Why python:3.13-slim instead of debian:bookworm-slim?  In
-# practice debian:bookworm-slim trips a "unknown version specified"
-# error from podman+crun on at least some OpenHost deploy hosts
-# (the bookworm base is too old to handle the OCI runtime
-# protocol the host's crun emits).  python:3.13-slim is a very
-# small newer-Debian-trixie image with bash + apt + ca-certs +
-# coreutils preinstalled, so we get past the build hurdle without
-# adding meaningful image size; the Python runtime is unused but
-# the layer is small and we tolerate it for portability across
-# operator hosts.
-FROM python:3.13-slim
-
-# -- system deps ------------------------------------------------
-# curl for first-boot operator inspection / probes.  bash, coreutils,
-# and ca-certificates are already in the python:3.13-slim base.
-RUN apt-get update -qq \
- && apt-get install -y --no-install-recommends curl \
- && rm -rf /var/lib/apt/lists/*
+# We use python:3.13-slim because it's a small Debian-trixie base
+# that already has bash + coreutils + ca-certificates that start.sh
+# needs for first-boot credential generation.  No `RUN apt-get
+# install` step needed in this Dockerfile, which is intentional:
+# some OpenHost deploy hosts run a podman+crun combo that fails
+# `RUN`-during-build with "unknown version specified" (the host's
+# crun is too old to handle newer image OCI metadata).  Keeping
+# the build to pure file copies sidesteps that issue and the image
+# still has everything we need at runtime.
 
 # -- minio + mc -------------------------------------------------
 # Statically-linked Go binaries; they don't depend on RHEL libs.
