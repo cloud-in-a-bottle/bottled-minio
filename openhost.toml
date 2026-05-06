@@ -1,0 +1,62 @@
+[app]
+name = "minio"
+version = "0.1.0"
+description = "MinIO S3-compatible object storage on OpenHost. The web console is gated by zone-owner SSO; the S3 API is exposed on a published host port and uses MinIO's native access-key auth (so any S3 client — aws-cli, rclone, mc, language SDKs — can talk to it without SSO)."
+
+[runtime.container]
+image = "Dockerfile"
+# The auth-proxy sidecar listens here and reverse-proxies the
+# zone-owner-only console to MinIO's console upstream on
+# 127.0.0.1:9001.  This is the port OpenHost exposes via the
+# zone's public TLS-terminating Caddy at /minio/.
+port = 9090
+
+# S3 API on TCP/9000 inside the container.  Published to host port
+# 9106 so external clients reach it as
+# https://<zone-domain>:9106 (or http://<zone-domain>:9106 if the
+# zone's outer Caddy isn't fronting it — see README "Connecting
+# clients" for the actual URL operators should use; OpenHost's
+# default routing terminates TLS at 443 and forwards the raw TCP
+# 9000 stream out via this published port).
+#
+# Why 9106: matches the imbue-openhost convention of using
+# port-range 9100+ for app-published TCP services (syncthing uses
+# 9101/9102; immich/peertube/etc. use 9000+ inside their own
+# spaces).  Any free 9100s host port would be fine.
+[[ports]]
+label = "s3-api"
+container_port = 9000
+host_port = 9106
+
+[routing]
+# MinIO's console exposes a small unauthenticated liveness probe at
+# /minio/health/live; the auth-proxy whitelists it so the OpenHost
+# router's probe doesn't trip the SSO gate.  We point health_check
+# at it directly.
+health_check = "/minio/health/live"
+# Public so the auth-proxy sidecar handles auth itself.  The
+# sidecar verifies the zone_auth cookie against the router's JWKS
+# and only forwards owner traffic to MinIO; everyone else gets
+# 403.  Same single-tenant model as openhost-syncthing — MinIO
+# is operator-controlled and there is no per-user permissions
+# scheme to maintain at this layer.  Per-user S3 access keys
+# (which the operator generates from inside the console) are a
+# separate auth dimension that gates the data plane on port 9106.
+public_paths = ["/"]
+
+[resources]
+# MinIO's RSS at idle is ~80 MiB; under load with several parallel
+# uploads a single instance hovers around 200-300 MiB.  The auth
+# proxy sidecar adds ~30 MiB.  512 MiB gives comfortable headroom
+# for occasional spikes during multipart upload bookkeeping.
+memory_mb = 512
+# MinIO is largely IO-bound.  500m is plenty for personal-scale
+# backup workloads (one-or-two-clients-at-a-time push/pull).  Bump
+# if this becomes a heavier-traffic instance.
+cpu_millicores = 500
+
+[data]
+# Persistent: all object data, the MinIO root credentials, the
+# server's configuration, and the IAM policies.  Lives under
+# OPENHOST_APP_DATA_DIR/data and OPENHOST_APP_DATA_DIR/config.
+app_data = true
