@@ -43,8 +43,15 @@ COPY --from=minio-source /usr/bin/minio /usr/bin/minio
 COPY --from=minio-source /usr/bin/mc /usr/bin/mc
 
 # -- application -----------------------------------------------
+# start.sh is committed to the repo with mode 0755 (verify with
+# `git ls-files --stage start.sh`).  Buildah/podman preserves the
+# git index mode through COPY, so no `RUN chmod +x` is needed here
+# — which is good, because some operator hosts have a podman+crun
+# combo that fails any RUN-during-build step (the host's crun
+# rejects the OCI metadata of newer base images with "unknown
+# version specified").  Keeping the build to pure file copies
+# sidesteps that issue.
 COPY start.sh /opt/openhost-minio/start.sh
-RUN chmod +x /opt/openhost-minio/start.sh
 
 # -- runtime ---------------------------------------------------
 # 9001 = MinIO console (the openhost.toml `port`).
