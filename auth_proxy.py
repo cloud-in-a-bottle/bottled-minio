@@ -383,21 +383,29 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
         auth_proxy.py — the body-streaming model used there
         applies cleanly here.
         """
-        # Headers to forward to upstream: drop only the trust
-        # headers.  Crucially, KEEP the original Host header — the
-        # MinIO console's WebSocket upgrader runs CheckOrigin
-        # validation that requires the request's Origin and Host
-        # to come from the same host:port.  If we rewrote Host to
-        # 127.0.0.1:9001 (the upstream loopback) the public
-        # browser's Origin header (https://minio.<zone>) wouldn't
-        # match and MinIO returns 403 with "request origin not
-        # allowed by Upgrader.CheckOrigin".
+        # MinIO's console WebSocket upgrader (Gorilla websocket
+        # CheckOrigin) returns 403 unless the request's Origin
+        # and Host come from the same host:port.
         #
-        # Forwarding the original Host means MinIO sees the same
-        # canonical hostname for both Host and Origin and the
-        # CheckOrigin pass succeeds.
-        ws_drop = ALWAYS_STRIP_HEADERS
+        # By the time the upgrade reaches us, the OpenHost router
+        # has already stripped the original public Host header and
+        # the websockets library it uses set a new Host based on
+        # the upstream connection target (127.0.0.1:9017 from the
+        # router's perspective).  But it preserved the original
+        # public Host in X-Forwarded-Host AND forwarded the Origin
+        # header verbatim.  So we have:
+        #
+        #   Host:             127.0.0.1:9017     (router-set)
+        #   Origin:           https://minio.<zone>     (preserved)
+        #   X-Forwarded-Host: minio.<zone>            (preserved)
+        #
+        # MinIO compares Host vs Origin and rejects.  Rewrite Host
+        # to match Origin (use X-Forwarded-Host) and the check
+        # passes.  We drop the existing Host so it doesn't compete
+        # with the new one we synthesize below.
+        ws_drop = ALWAYS_STRIP_HEADERS | frozenset({"host"})
         cleaned = _strip_headers(self.headers.items(), ws_drop)
+        forwarded_host = self.headers.get("X-Forwarded-Host", "").strip()
 
         try:
             upstream_sock = socket.create_connection(
@@ -415,16 +423,24 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
             # http.client here because its framing model doesn't
             # cleanly expose the post-101 socket for byte-level
             # forwarding.
-            # Build the request as raw bytes.  Note: we do NOT
-            # synthesise a Host header here — the cleaned headers
-            # already include the original Host (we no longer
-            # drop it), and MinIO needs that exact value to pass
-            # its WebSocket Origin check.
+            # Build the request as raw bytes.  We synthesize a
+            # Host header from X-Forwarded-Host (the original
+            # public hostname the browser was on, preserved by the
+            # OpenHost router's WS proxy) so it matches the
+            # Origin header MinIO is checking against.  Falls back
+            # to the upstream loopback address only if X-Forwarded
+            # -Host is absent, which would only happen if some
+            # other component talked to us directly — not a
+            # realistic production case.
+            host_header = forwarded_host or f"{self.upstream_host}:{self.upstream_port}"
             request_bytes = bytearray()
             request_bytes.extend(
                 self._encode_header_bytes(
                     f"{self.command} {self.path} HTTP/1.1\r\n"
                 )
+            )
+            request_bytes.extend(
+                self._encode_header_bytes(f"Host: {host_header}\r\n")
             )
             for k, v in cleaned:
                 request_bytes.extend(
