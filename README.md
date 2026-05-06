@@ -8,17 +8,18 @@ Use this when you want a generic blob backend on your zone that any S3 client (`
 
 - **Web console** at `https://<your-zone>/minio`. Gated by OpenHost zone-owner SSO. Beyond the SSO gate you log into MinIO with the auto-generated root credentials (recoverable from inside the container — see "First-boot credentials" below).
 - **S3 API** at `<your-zone>:9106` (the `[[ports]]` published port from `openhost.toml`). Authenticated with MinIO access keys you generate yourself in the console. Anyone with a valid access key + secret can use the API; the SSO gate is NOT in this path.
-- **Persistent storage** under `$OPENHOST_APP_DATA_DIR/data/` (host-side: `/data/app_data/minio/data/`). Object data, IAM policies, and root credentials all live here.
+- **Persistent storage** under `$OPENHOST_APP_DATA_DIR/` (in-container: `/data/app_data/minio/`). Object data, IAM policies, and root credentials all live here. The same files show up on the OpenHost host under the persistent app_data dir.
 
 ## Quick start
 
 After the app is deployed:
 
 ```sh
-# 1. Recover the root password from inside the container.
-oh app shell minio cat /data/config/root-credentials.txt
+# 1. Recover the root password from inside the container (run on the
+#    OpenHost host that's running this app):
+podman exec openhost-minio cat /data/app_data/minio/config/root-credentials.txt
 
-# Output:
+# Output (substitute your own zone path / instance prefix as needed):
 # export MINIO_ROOT_USER='openhost-XXXXXXXX'
 # export MINIO_ROOT_PASSWORD='YYYY...'
 
@@ -31,8 +32,9 @@ open https://<your-zone>/minio
 # In the console: Identity → Access Keys → Create access key. Copy
 # both halves; the secret is only shown once.
 
-# 4. Point an S3 client at the API.
-mc alias set zone https://<your-zone>:9106 <access-key> <secret>
+# 4. Point an S3 client at the API.  No TLS by default on the
+#    published port — the outer zone Caddy doesn't front this port.
+mc alias set zone http://<your-zone>:9106 <access-key> <secret>
 mc mb zone/backup
 mc cp -r /local/cryfs/ zone/backup/cryfs/
 ```

@@ -22,11 +22,13 @@ set -euo pipefail
 # Persistence
 # -----------------------------------------------------------------
 
-# OpenHost mounts the persistent dir at /data inside the container.
-# We split it into:
+# OpenHost mounts the persistent app-data dir at
+# OPENHOST_APP_DATA_DIR (typically /data/app_data/minio inside the
+# container; the host-side path is the persistent app_data dir
+# under the OpenHost data root).  We split it into:
 #   data/    — MinIO object data (every bucket lives here).  This
-#              is where MinIO writes blobs.  The --address argument
-#              below points at this directory.
+#              is where MinIO writes blobs.  The `minio server`
+#              argument below points at this directory.
 #   config/  — MinIO's configuration directory (--config-dir).
 #              Holds .minio.sys/, IAM policies, encryption keys, etc.
 #   certs/   — TLS material (currently unused — the zone's outer
@@ -37,6 +39,12 @@ PERSIST="${OPENHOST_APP_DATA_DIR:-/data/app_data/minio}"
 DATA_DIR="$PERSIST/data"
 CONFIG_DIR="$PERSIST/config"
 CERTS_DIR="$PERSIST/certs"
+# In a real OpenHost deploy compute_space sets
+# OPENHOST_APP_DATA_DIR=/data/app_data/minio inside the container,
+# so DATA_DIR resolves to /data/app_data/minio/data, CONFIG_DIR
+# to /data/app_data/minio/config, etc.  The same paths show up
+# on the OpenHost host under
+# /home/host/.openhost/.../persistent_data/app_data/minio/.
 mkdir -p "$DATA_DIR" "$CONFIG_DIR" "$CERTS_DIR"
 
 # -----------------------------------------------------------------
@@ -45,9 +53,10 @@ mkdir -p "$DATA_DIR" "$CONFIG_DIR" "$CERTS_DIR"
 #
 # MinIO requires the MINIO_ROOT_USER / MINIO_ROOT_PASSWORD env vars
 # to start.  On first boot we generate strong defaults and persist
-# them to disk so the operator can read them out (e.g. via an
-# `oh app shell minio cat /data/config/root-credentials.txt`) and
-# wire them into the console at first login.  Subsequent boots
+# them to disk under $CONFIG_DIR/root-credentials.txt — operators
+# read them via e.g.
+#   podman exec openhost-minio cat /data/app_data/minio/config/root-credentials.txt
+# and wire them into the console at first login.  Subsequent boots
 # read the same file so the credentials stay stable across
 # container restarts; rotating means deleting the file (and
 # updating MinIO's IAM separately if you cared about the old key
