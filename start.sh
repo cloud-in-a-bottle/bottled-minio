@@ -86,6 +86,21 @@ EOF
 fi
 export MINIO_ROOT_USER MINIO_ROOT_PASSWORD
 
+# The upstream minio/minio:latest image sets several `MINIO_..._FILE`
+# env vars (MINIO_ROOT_USER_FILE, MINIO_ROOT_PASSWORD_FILE,
+# MINIO_ACCESS_KEY_FILE, MINIO_SECRET_KEY_FILE, MINIO_KMS_SECRET_KEY_FILE,
+# MINIO_CONFIG_ENV_FILE) intended for Docker-secret-style mount-a-file
+# auth.  When BOTH the env var (e.g. MINIO_ROOT_USER) and its _FILE
+# variant are set, MinIO behaves inconsistently and the console's
+# /api/v1/login endpoint returns 503 "unable to login due to network
+# error" — because the server-internal auth path picks up unresolved
+# file paths while the env-var path is set.  We're providing the
+# values directly via env vars (above), so unset the _FILE variants
+# to avoid the conflict.
+unset MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE
+unset MINIO_ACCESS_KEY_FILE MINIO_SECRET_KEY_FILE
+unset MINIO_KMS_SECRET_KEY_FILE MINIO_CONFIG_ENV_FILE
+
 # -----------------------------------------------------------------
 # Console + API URL hints
 # -----------------------------------------------------------------
