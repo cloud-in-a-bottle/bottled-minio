@@ -5,44 +5,66 @@ description = "MinIO S3-compatible object storage on OpenHost. The web console i
 
 [runtime.container]
 image = "Dockerfile"
-# The auth-proxy sidecar listens here and reverse-proxies the
-# zone-owner-only console to MinIO's console upstream on
-# 127.0.0.1:9001.  This is the port OpenHost exposes via the
-# zone's public TLS-terminating Caddy at /minio/.
-port = 9090
+# Container port 9001 is MinIO's web console.  The OpenHost router
+# routes browser traffic from /minio/ to this port and gates the
+# request itself: visitors without a valid zone_auth cookie get
+# a 302 redirect to /login on the parent domain, then come back
+# and hit MinIO's own login page after they've SSO'd through
+# OpenHost.
+#
+# Why no auth-proxy sidecar?  Three apps in the OpenHost catalog
+# illustrate three different patterns:
+#
+#   * openhost-syncthing — owner-only daemon with no own login
+#     page, so its sidecar 403s non-owners (no useful "sign in
+#     with OpenHost" UI exists upstream).
+#   * openhost-nextcloud — needs public_paths=["/"] for native
+#     sync clients (WebDAV/OCS) that share the same port as the
+#     browser console; sidecar gates SELECTIVELY and stamps an
+#     X-Openhost-User header so user_saml in env-var mode
+#     auto-creates accounts.
+#   * openhost-peertube — federation requires public access on
+#     the browser port; sidecar bounces only authenticated owners
+#     into a plugin SSO route, leaves anonymous viewers alone.
+#
+# MinIO doesn't fit any of those.  The console has its own login
+# UI (so 403 is a worse UX than letting the user see the form);
+# there's no native-sync-on-the-same-port concern (S3 lives on
+# the separate published port below); and there's no federation
+# surface.  The cleanest model is just "router gates everything,
+# MinIO handles its own login afterwards" — no sidecar to
+# maintain.
+port = 9001
 
 # S3 API on TCP/9000 inside the container.  Published to host port
 # 9106 so external clients reach it as
-# https://<zone-domain>:9106 (or http://<zone-domain>:9106 if the
-# zone's outer Caddy isn't fronting it — see README "Connecting
-# clients" for the actual URL operators should use; OpenHost's
-# default routing terminates TLS at 443 and forwards the raw TCP
-# 9000 stream out via this published port).
+# http://<zone-domain>:9106.  The zone's outer Caddy does NOT
+# front this port — clients hit it directly without TLS by
+# default.  See README "Connecting clients" for setup hints.
 #
 # Why 9106: matches the imbue-openhost convention of using
 # port-range 9100+ for app-published TCP services (syncthing uses
-# 9101/9102; immich/peertube/etc. use 9000+ inside their own
-# spaces).  Any free 9100s host port would be fine.
+# 9101/9102).  Any free 9100s host port would be fine.
 [[ports]]
 label = "s3-api"
 container_port = 9000
 host_port = 9106
 
 [routing]
-# MinIO's console exposes a small unauthenticated liveness probe at
-# /minio/health/live; the auth-proxy whitelists it so the OpenHost
-# router's probe doesn't trip the SSO gate.  We point health_check
-# at it directly.
+# Used by the OpenHost dashboard to decide if this app is
+# "running."  The wait_for_ready probe just hits "/" and accepts
+# any non-5xx response, but a more specific endpoint helps the
+# dashboard distinguish "container up" from "MinIO actually ready
+# to serve."
 health_check = "/minio/health/live"
-# Public so the auth-proxy sidecar handles auth itself.  The
-# sidecar verifies the zone_auth cookie against the router's JWKS
-# and only forwards owner traffic to MinIO; everyone else gets
-# 403.  Same single-tenant model as openhost-syncthing — MinIO
-# is operator-controlled and there is no per-user permissions
-# scheme to maintain at this layer.  Per-user S3 access keys
-# (which the operator generates from inside the console) are a
-# separate auth dimension that gates the data plane on port 9106.
-public_paths = ["/"]
+# Console is private — every console URL requires a valid
+# zone_auth cookie.  The OpenHost router enforces this at its
+# layer and 302-redirects unauthenticated browsers to /login on
+# the parent zone domain.  After SSO completes, the same path
+# routes through correctly because the cookie is now in scope
+# (zone_auth is set with Domain=<zone-domain>, valid for both
+# the path-prefix and subdomain forms of this app's URL).
+public_paths = []
 
 [resources]
 # MinIO's RSS at idle is ~80 MiB; under load with several parallel

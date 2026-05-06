@@ -43,15 +43,18 @@ The S3 API host port (`9106`) is set in `openhost.toml`'s `[[ports]]` block; if 
 
 ## How the SSO gate works
 
-The console binds on loopback (`127.0.0.1:9001`) inside the container, where only the auth-proxy sidecar can reach it. The sidecar (`auth_proxy.py`) listens on `0.0.0.0:9090` — the OpenHost router routes browser traffic from `https://<zone>/minio` to that port. On every request the sidecar:
+There is **no auth-proxy sidecar in this app**. Authentication is enforced one layer up by the OpenHost router itself: every request to `/minio/*` is checked against the visitor's `zone_auth` cookie before the router decides whether to forward it to the container.
 
-1. Whitelists `/minio/health/live` and `/minio/health/ready` for the OpenHost router's liveness probes.
-2. For everything else, parses the `zone_auth` cookie, verifies it as an RS256 JWT against the OpenHost router's JWKS, and only forwards the request if `sub == "owner"`.
-3. Failed verification → 403. Verified → request forwarded to MinIO with the original `Host` header preserved (so MinIO's redirect URLs come out right).
+- **No cookie / invalid cookie** → router 302-redirects to `https://<zone>/login`. After SSO completes the cookie is set and the visitor is back on the parent domain; following the original URL again routes them through to MinIO's own login form.
+- **Valid owner cookie** → router forwards the request straight to MinIO's console on container port 9001.
 
-This is an exact copy of the `openhost-syncthing` auth-proxy pattern; the diff is the upstream port (9001 vs 8385) and the health-path whitelist.
+This pattern is simpler than what `openhost-syncthing` / `openhost-nextcloud` / `openhost-peertube` use, all of which run an auth-proxy sidecar. The sidecar is unnecessary here because:
 
-The S3 API on port `9000` (host port `9106`) does NOT go through the auth-proxy. It uses MinIO's own access-key auth, which is the right primitive for non-browser clients — `aws s3 cp` cannot do an OpenHost SSO redirect dance.
+- MinIO has its own login UI (so a 403 on missing cookie would be a worse UX than letting the OpenHost router do its standard login redirect).
+- MinIO's S3 API lives on a different port (the `[[ports]]` mapping below), so we don't have nextcloud's "native sync clients sharing the browser port" problem.
+- MinIO doesn't federate, so we don't have peertube's "anonymous viewers must reach the browser port" problem.
+
+The S3 API on container port `9000` (host port `9106`) is reachable directly without going through the OpenHost router. It uses MinIO's own access-key auth, which is the right primitive for non-browser clients — `aws s3 cp` cannot do an OpenHost SSO redirect dance.
 
 ## First-boot credentials
 
@@ -73,13 +76,9 @@ You can also override at deploy time via env vars: if `MINIO_ROOT_USER` / `MINIO
 | `OPENHOST_APP_DATA_DIR`   | Persistent data dir; injected by compute_space at boot.      | `/data/app_data/minio`                        |
 | `OPENHOST_ZONE_DOMAIN`    | Zone domain; injected. Used to derive `MINIO_BROWSER_REDIRECT_URL` and `MINIO_SERVER_URL`. | `localhost`                                   |
 | `OPENHOST_APP_BASE_PATH`  | Path-prefix the OpenHost router uses for this app.           | `/minio`                                      |
-| `OPENHOST_ROUTER_URL`     | Internal URL used by the auth-proxy to fetch the JWKS.       | injected                                      |
 | `MINIO_ROOT_USER`         | Override the auto-generated root user.                       | auto                                          |
 | `MINIO_ROOT_PASSWORD`     | Override the auto-generated root password.                   | auto                                          |
 | `MINIO_S3_API_HOST_PORT`  | Used to compose `MINIO_SERVER_URL`. Should match the host port mapped to container 9000 in `openhost.toml`. | `9106`                                        |
-| `MINIO_CONSOLE_BIND`      | Loopback bind for the console (where the auth-proxy talks).  | `127.0.0.1:9001`                              |
-| `AUTH_PROXY_LISTEN_PORT`  | Public port the auth-proxy listens on; this is the `port` in `openhost.toml`. | `9090`                                        |
-| `AUTH_PROXY_UPSTREAM_PORT`| Where the auth-proxy forwards verified requests.             | `9001`                                        |
 
 In a default deploy you don't have to set any of these; sensible values come out of `start.sh` and `openhost.toml`.
 
@@ -94,8 +93,7 @@ In a default deploy you don't have to set any of these; sensible values come out
 
 - **Console redirects to `http://127.0.0.1` and breaks**: `MINIO_BROWSER_REDIRECT_URL` did not get set correctly. Check that `OPENHOST_ZONE_DOMAIN` is in the container's environment and that `start.sh` set the export.
 - **`mc` / `aws s3` connection refused on the API port**: confirm the `[[ports]]` entry in `openhost.toml` actually published the host port. `oh app status minio` from the operator side should show the mapping. The S3 API URL is `http://<zone>:9106` (no TLS by default).
-- **403 on every console request**: zone_auth cookie is not landing. Sign out of the OpenHost dashboard and back in, then revisit `https://<zone>/minio`.
-- **`auth-proxy not initialised` 503**: the sidecar's first JWKS fetch failed and it has nothing cached. Usually means the OpenHost router is unreachable from the container; check `OPENHOST_ROUTER_URL` and confirm the router is up.
+- **Stuck at the OpenHost login page when visiting `/minio/`**: sign in to OpenHost first, then revisit. The router 302's unauthenticated visitors to `/login`; coming back to `/minio` after the cookie is set should land you at MinIO's own login form.
 
 ## Updating
 
