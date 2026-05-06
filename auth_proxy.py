@@ -384,10 +384,19 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
         applies cleanly here.
         """
         # Headers to forward to upstream: drop only the trust
-        # headers and Host (we'll re-write Host below).  Keep
-        # Upgrade, Connection, and Sec-WebSocket-* intact —
-        # those are part of the handshake.
-        ws_drop = ALWAYS_STRIP_HEADERS | frozenset({"host"})
+        # headers.  Crucially, KEEP the original Host header — the
+        # MinIO console's WebSocket upgrader runs CheckOrigin
+        # validation that requires the request's Origin and Host
+        # to come from the same host:port.  If we rewrote Host to
+        # 127.0.0.1:9001 (the upstream loopback) the public
+        # browser's Origin header (https://minio.<zone>) wouldn't
+        # match and MinIO returns 403 with "request origin not
+        # allowed by Upgrader.CheckOrigin".
+        #
+        # Forwarding the original Host means MinIO sees the same
+        # canonical hostname for both Host and Origin and the
+        # CheckOrigin pass succeeds.
+        ws_drop = ALWAYS_STRIP_HEADERS
         cleaned = _strip_headers(self.headers.items(), ws_drop)
 
         try:
@@ -406,15 +415,15 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
             # http.client here because its framing model doesn't
             # cleanly expose the post-101 socket for byte-level
             # forwarding.
+            # Build the request as raw bytes.  Note: we do NOT
+            # synthesise a Host header here — the cleaned headers
+            # already include the original Host (we no longer
+            # drop it), and MinIO needs that exact value to pass
+            # its WebSocket Origin check.
             request_bytes = bytearray()
             request_bytes.extend(
                 self._encode_header_bytes(
                     f"{self.command} {self.path} HTTP/1.1\r\n"
-                )
-            )
-            request_bytes.extend(
-                self._encode_header_bytes(
-                    f"Host: {self.upstream_host}:{self.upstream_port}\r\n"
                 )
             )
             for k, v in cleaned:
