@@ -451,7 +451,12 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
             # If upstream rejected the upgrade, no bidirectional
             # phase needed; the client already has the rejection.
             if not head_bytes.startswith(b"HTTP/1.1 101"):
-                log.info("upstream rejected websocket upgrade")
+                # Log the status line + a snippet of the body so
+                # the operator can see why the upgrade failed.
+                first_line = head_bytes.split(b"\r\n", 1)[0].decode(
+                    "latin-1", errors="replace"
+                )
+                log.info("upstream rejected websocket upgrade: %s", first_line)
                 return
 
             self._websocket_pump(self.connection, upstream_sock)
