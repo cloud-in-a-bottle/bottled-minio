@@ -48,6 +48,7 @@ import json
 import logging
 import os
 import re
+import selectors
 import socket
 import sys
 import threading
@@ -118,6 +119,16 @@ CLIENT_READ_TIMEOUT_SECONDS = 60
 # go through the S3 API on a separate port and don't traverse
 # this code path.
 MAX_BODY_BYTES = 64 * 1024 * 1024
+
+# WebSocket bidirectional-forwarding constants.  MinIO's console
+# uses a /ws/objectManager WebSocket for live object listing
+# updates inside the bucket browser; without WS support the SPA
+# spins forever trying to upgrade.  These constants are sized for
+# WS traffic specifically (small chunks, long total session
+# lifetime).
+STREAM_CHUNK_BYTES = 64 * 1024
+STREAM_TIMEOUT_SECONDS = 30 * 60
+HEADER_LINE_CAP = 64 * 1024
 
 # Path the MinIO console uses for credential exchange.  Empirically
 # verified: POST {accessKey, secretKey} JSON returns 204 + a
@@ -299,6 +310,21 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
+        # WebSocket upgrade requests bypass the auto-login + body-
+        # buffering paths entirely.  MinIO's bucket-browser SPA
+        # opens a /ws/objectManager WebSocket for live object
+        # listings; without this branch the proxy returns 400 to
+        # the upgrade and the SPA gets stuck in a retry loop.
+        # Treat the upgrade like any other proxy hop: forward the
+        # handshake to upstream and switch to bidirectional byte
+        # forwarding.  The cookie that authenticates the WS to
+        # MinIO is already present (the SPA has the token cookie
+        # by the time it opens the WS), so no auto-login dance
+        # is needed here.
+        if self._is_websocket_upgrade():
+            self._proxy_websocket()
+            return
+
         is_owner = self.headers.get(OWNER_HEADER_NAME, "").lower() == "true"
         cookies = _parse_cookie_header(self.headers.get("Cookie"))
         has_minio_session = MINIO_TOKEN_COOKIE in cookies
@@ -322,6 +348,220 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
 
         # Pass through.
         self._proxy()
+
+    # ----------------------------------------------------------------
+    # WebSocket upgrade handling
+    # ----------------------------------------------------------------
+
+    def _is_websocket_upgrade(self) -> bool:
+        """True if the request is a WebSocket upgrade per RFC 6455 §4.1."""
+        upgrade = self.headers.get("Upgrade", "").lower().strip()
+        connection = self.headers.get("Connection", "").lower()
+        # ``Connection`` is comma-separated; check for ``upgrade``
+        # as one of the tokens.
+        connection_tokens = {t.strip() for t in connection.split(",")}
+        return upgrade == "websocket" and "upgrade" in connection_tokens
+
+    def _proxy_websocket(self) -> None:
+        """Forward a WebSocket upgrade request bidirectionally.
+
+        Open a TCP connection to upstream, send the request
+        verbatim (preserving Upgrade + Connection: Upgrade and the
+        Sec-WebSocket-* trio), forward the upstream's 101 response
+        head to the client, then shuffle bytes both directions
+        until either side closes.
+
+        The HTTP path's hop-by-hop header stripping and Content-
+        Length rebuilding are deliberately bypassed for this code
+        path because they would break the handshake.  We DO strip
+        the SSO trust headers (X-OpenHost-Is-Owner / X-OpenHost-
+        User) before forwarding, same as the HTTP path, so a
+        hostile client can't forge owner identity through a
+        WebSocket request.
+
+        The implementation is adapted from openhost-peertube's
+        auth_proxy.py — the body-streaming model used there
+        applies cleanly here.
+        """
+        # Headers to forward to upstream: drop only the trust
+        # headers and Host (we'll re-write Host below).  Keep
+        # Upgrade, Connection, and Sec-WebSocket-* intact —
+        # those are part of the handshake.
+        ws_drop = ALWAYS_STRIP_HEADERS | frozenset({"host"})
+        cleaned = _strip_headers(self.headers.items(), ws_drop)
+
+        try:
+            upstream_sock = socket.create_connection(
+                (self.upstream_host, self.upstream_port),
+                timeout=STREAM_TIMEOUT_SECONDS,
+            )
+        except OSError as exc:
+            log.warning("upstream connect failed (websocket): %s", exc)
+            self._safe_send_error(502, "Bad Gateway")
+            return
+
+        try:
+            upstream_sock.settimeout(STREAM_TIMEOUT_SECONDS)
+            # Build the request as raw bytes.  We avoid
+            # http.client here because its framing model doesn't
+            # cleanly expose the post-101 socket for byte-level
+            # forwarding.
+            request_bytes = bytearray()
+            request_bytes.extend(
+                self._encode_header_bytes(
+                    f"{self.command} {self.path} HTTP/1.1\r\n"
+                )
+            )
+            request_bytes.extend(
+                self._encode_header_bytes(
+                    f"Host: {self.upstream_host}:{self.upstream_port}\r\n"
+                )
+            )
+            for k, v in cleaned:
+                request_bytes.extend(
+                    self._encode_header_bytes(f"{k}: {v}\r\n")
+                )
+            request_bytes.extend(b"\r\n")
+            try:
+                upstream_sock.sendall(bytes(request_bytes))
+            except OSError as exc:
+                log.warning("websocket request send failed: %s", exc)
+                self._safe_send_error(502, "Bad Gateway")
+                return
+
+            # Read upstream response head (and any leftover bytes
+            # pipelined into the same recv) and forward verbatim.
+            response_buf = self._read_until_double_crlf(
+                upstream_sock, max_bytes=HEADER_LINE_CAP
+            )
+            if response_buf is None:
+                self._safe_send_error(502, "Bad Gateway")
+                return
+            head_bytes, tail_bytes = response_buf
+
+            try:
+                self.wfile.write(head_bytes)
+                if tail_bytes:
+                    self.wfile.write(tail_bytes)
+                self.wfile.flush()
+            except OSError as exc:
+                log.debug("client disconnected during ws handshake: %s", exc)
+                return
+
+            # If upstream rejected the upgrade, no bidirectional
+            # phase needed; the client already has the rejection.
+            if not head_bytes.startswith(b"HTTP/1.1 101"):
+                log.info("upstream rejected websocket upgrade")
+                return
+
+            self._websocket_pump(self.connection, upstream_sock)
+        finally:
+            try:
+                upstream_sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                upstream_sock.close()
+            except OSError:
+                pass
+
+    @staticmethod
+    def _read_until_double_crlf(
+        sock: socket.socket, max_bytes: int
+    ) -> tuple[bytes, bytes] | None:
+        """Read bytes from ``sock`` until ``\\r\\n\\r\\n``.
+
+        Returns ``(head_including_terminator, leftover_bytes)`` or
+        ``None`` on EOF / overflow / socket error.  ``leftover_bytes``
+        is whatever bytes were read past the header terminator in
+        the same recv() — typically empty for a WebSocket handshake.
+        """
+        buf = bytearray()
+        while True:
+            try:
+                chunk = sock.recv(4096)
+            except OSError as exc:
+                log.info("websocket handshake recv failed: %s", exc)
+                return None
+            if not chunk:
+                return None
+            buf.extend(chunk)
+            idx = buf.find(b"\r\n\r\n")
+            if idx >= 0:
+                head = bytes(buf[: idx + 4])
+                tail = bytes(buf[idx + 4 :])
+                return head, tail
+            if len(buf) >= max_bytes:
+                log.warning(
+                    "websocket response head exceeds %d bytes; aborting",
+                    max_bytes,
+                )
+                return None
+
+    @staticmethod
+    def _websocket_pump(
+        client_sock: socket.socket, upstream_sock: socket.socket
+    ) -> None:
+        """Bidirectionally forward bytes between two sockets.
+
+        Returns when either socket closes.  Uses ``selectors`` so a
+        single thread can wait on both directions; matches the
+        pattern Caddy / nginx use for WebSocket reverse-proxying.
+        """
+        for s in (client_sock, upstream_sock):
+            try:
+                s.settimeout(None)
+            except OSError:
+                pass
+
+        sel = selectors.DefaultSelector()
+        try:
+            sel.register(client_sock, selectors.EVENT_READ, "client")
+            sel.register(upstream_sock, selectors.EVENT_READ, "upstream")
+            while True:
+                events = sel.select(timeout=STREAM_TIMEOUT_SECONDS)
+                if not events:
+                    log.info("websocket idle timeout; closing")
+                    return
+                for key, _ in events:
+                    if key.data == "client":
+                        src, dst = client_sock, upstream_sock
+                        direction = "client→upstream"
+                    else:
+                        src, dst = upstream_sock, client_sock
+                        direction = "upstream→client"
+                    try:
+                        chunk = src.recv(STREAM_CHUNK_BYTES)
+                    except OSError as exc:
+                        log.info(
+                            "websocket %s recv failed: %s",
+                            direction, exc,
+                        )
+                        return
+                    if not chunk:
+                        log.debug("websocket %s EOF; closing", direction)
+                        return
+                    try:
+                        dst.sendall(chunk)
+                    except OSError as exc:
+                        log.info(
+                            "websocket %s sendall failed: %s",
+                            direction, exc,
+                        )
+                        return
+        finally:
+            try:
+                sel.close()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("websocket selector close failed: %s", exc)
+
+    @staticmethod
+    def _encode_header_bytes(value: str) -> bytes:
+        try:
+            return value.encode("latin-1")
+        except UnicodeEncodeError:
+            log.warning("non-latin-1 header value, replacing offending bytes")
+            return value.encode("latin-1", errors="replace")
 
     def _maybe_auto_login(self) -> bool:
         """Attempt to auto-login to MinIO and 302 with the cookie set.
