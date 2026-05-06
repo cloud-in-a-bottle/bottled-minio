@@ -121,7 +121,6 @@ unset MINIO_KMS_SECRET_KEY_FILE MINIO_CONFIG_ENV_FILE
 # / OAuth redirects all targeted the wrong origin.
 ZONE_DOMAIN="${OPENHOST_ZONE_DOMAIN:-localhost}"
 APP_NAME="${OPENHOST_APP_NAME:-minio}"
-S3_API_HOST_PORT="${MINIO_S3_API_HOST_PORT:-9106}"
 
 # Console URL: where the browser hits the console.  Subdomain
 # form (``minio.<zone-domain>``) is the canonical OpenHost URL
@@ -130,14 +129,24 @@ S3_API_HOST_PORT="${MINIO_S3_API_HOST_PORT:-9106}"
 # one the dashboard links to.
 export MINIO_BROWSER_REDIRECT_URL="https://${APP_NAME}.${ZONE_DOMAIN}"
 
-# S3 API URL: the public endpoint clients use for `aws s3 cp`,
-# rclone, mc, etc.  Reaches MinIO via the [[ports]] mapping
-# (host_port 9106 → container 9000).  Note: HTTP, not HTTPS — the
-# zone's outer Caddy does NOT TLS-terminate this port.  For a
-# production setup that needs TLS on the S3 endpoint, drop a cert
-# pair into $CERTS_DIR/public.crt and $CERTS_DIR/private.key;
-# MinIO will pick them up at startup.
-export MINIO_SERVER_URL="http://${ZONE_DOMAIN}:${S3_API_HOST_PORT}"
+# NOTE: we deliberately do NOT set MINIO_SERVER_URL.
+#
+# That env var has a dual role: (a) it advertises the public S3
+# URL to the browser SPA for display, and (b) it's used by the
+# console's internal auth path to call back to the server for
+# credential validation.  The two roles want different values:
+# (a) wants the public URL (http://<zone>:9106 in our setup), but
+# (b) wants a loopback URL the container can actually reach
+# (http://127.0.0.1:9000).  When set to the public URL, login
+# returns 503 "unable to login due to network error" because
+# rootless podman's network namespacing means the container
+# cannot reach its own host's public-port binding.
+#
+# Leaving MINIO_SERVER_URL unset makes the console fall back to
+# loopback for (b) and use the request's Host header for (a),
+# which works cleanly.  The S3 API URL the operator should
+# actually use (http://<zone>:9106) is documented in the README
+# instead of being shown in the console.
 
 # -----------------------------------------------------------------
 # Launch MinIO
