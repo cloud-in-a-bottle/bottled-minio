@@ -4,7 +4,7 @@
 # Topology:
 #
 #   browser → OpenHost outer Caddy (TLS termination)
-#          → OpenHost router (path-prefix /minio/, auth-gates here)
+#          → OpenHost router (subdomain minio.<zone>, auth-gates here)
 #          → container :9001  (MinIO console)
 #
 #   S3 client (aws-cli, rclone, mc, etc.) →
@@ -92,18 +92,28 @@ export MINIO_ROOT_USER MINIO_ROOT_PASSWORD
 #
 # These two env vars tell MinIO what URLs to report to clients.
 # Without them, the console emits redirect-back URLs based on
-# whatever Host the proxy forwarded, which loops badly behind a
-# path-prefix router.  Setting them explicitly pins the console's
-# self-referential URLs to the public hostname.
+# whatever Host the proxy forwarded, which causes redirect loops
+# and broken assets when the SPA's self-references don't match
+# the URL the browser is on.  Setting them explicitly pins the
+# console's self-referential URLs to the public hostname.
+#
+# OpenHost serves apps on a subdomain by default
+# (``<app>.<zone-domain>``).  A path-prefixed form
+# (``<zone-domain>/<app>``) is also routable but isn't the
+# canonical URL, and pinning the console at the path-prefixed
+# form caused exactly this kind of breakage when browsers
+# loaded the SPA from the subdomain: manifest.json / API calls
+# / OAuth redirects all targeted the wrong origin.
 ZONE_DOMAIN="${OPENHOST_ZONE_DOMAIN:-localhost}"
-APP_BASE_PATH="${OPENHOST_APP_BASE_PATH:-/minio}"
+APP_NAME="${OPENHOST_APP_NAME:-minio}"
 S3_API_HOST_PORT="${MINIO_S3_API_HOST_PORT:-9106}"
 
-# Console URL: where the browser thinks the console lives.  The
-# OpenHost router forwards /minio/* on the zone domain to this
-# container's port 9001, so the public URL is
-# https://<zone>/minio.
-export MINIO_BROWSER_REDIRECT_URL="https://${ZONE_DOMAIN}${APP_BASE_PATH}"
+# Console URL: where the browser hits the console.  Subdomain
+# form (``minio.<zone-domain>``) is the canonical OpenHost URL
+# for an app; the OpenHost router accepts both subdomain and
+# path-prefix routes for the same app, but the subdomain is the
+# one the dashboard links to.
+export MINIO_BROWSER_REDIRECT_URL="https://${APP_NAME}.${ZONE_DOMAIN}"
 
 # S3 API URL: the public endpoint clients use for `aws s3 cp`,
 # rclone, mc, etc.  Reaches MinIO via the [[ports]] mapping

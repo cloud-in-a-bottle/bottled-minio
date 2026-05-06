@@ -6,11 +6,14 @@ description = "MinIO S3-compatible object storage on OpenHost. The web console i
 [runtime.container]
 image = "Dockerfile"
 # Container port 9001 is MinIO's web console.  The OpenHost router
-# routes browser traffic from /minio/ to this port and gates the
-# request itself: visitors without a valid zone_auth cookie get
-# a 302 redirect to /login on the parent domain, then come back
-# and hit MinIO's own login page after they've SSO'd through
-# OpenHost.
+# routes browser traffic from minio.<zone-domain> (the canonical
+# subdomain form) to this port and gates the request itself:
+# visitors without a valid zone_auth cookie get a 302 redirect
+# to /login on the parent domain, then come back and hit MinIO's
+# own login page after they've SSO'd through OpenHost.  (The
+# router also accepts the path-prefixed form
+# <zone-domain>/minio/ for compatibility, but the dashboard
+# links to the subdomain.)
 #
 # Why no auth-proxy sidecar?  Three apps in the OpenHost catalog
 # illustrate three different patterns:
@@ -60,10 +63,11 @@ health_check = "/minio/health/live"
 # Console is private — every console URL requires a valid
 # zone_auth cookie.  The OpenHost router enforces this at its
 # layer and 302-redirects unauthenticated browsers to /login on
-# the parent zone domain.  After SSO completes, the same path
-# routes through correctly because the cookie is now in scope
-# (zone_auth is set with Domain=<zone-domain>, valid for both
-# the path-prefix and subdomain forms of this app's URL).
+# the parent zone domain.  After SSO completes, the same URL
+# routes through correctly because the cookie is set with
+# Domain=<zone-domain>, valid for both the canonical subdomain
+# form (minio.<zone-domain>) and the path-prefix fallback
+# (<zone-domain>/minio).
 public_paths = []
 
 [resources]

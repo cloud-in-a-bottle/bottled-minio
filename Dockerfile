@@ -10,11 +10,12 @@
 # mkdir, chown, dd, etc.) — they're hardlinked into a single
 # busybox-style multi-call binary.
 #
-# Auth: the OpenHost router gates the console on /minio/ — every
-# request needs a valid zone_auth cookie or the router 302's the
-# visitor to /login on the parent zone.  No auth-proxy sidecar is
-# needed; see the openhost.toml comment for why this differs from
-# openhost-syncthing / openhost-nextcloud / openhost-peertube.
+# Auth: the OpenHost router gates the console at minio.<zone> —
+# every request needs a valid zone_auth cookie or the router
+# 302's the visitor to /login on the parent zone.  No auth-proxy
+# sidecar is needed; see the openhost.toml comment for why this
+# differs from openhost-syncthing / openhost-nextcloud /
+# openhost-peertube.
 
 FROM minio/minio:latest
 
