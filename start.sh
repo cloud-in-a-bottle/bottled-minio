@@ -4,17 +4,31 @@
 # Topology:
 #
 #   browser → OpenHost outer Caddy (TLS termination)
-#          → OpenHost router (subdomain minio.<zone>, auth-gates here)
-#          → container :9001  (MinIO console)
+#          → OpenHost router (subdomain minio.<zone>, JWT-verifies
+#                              and stamps X-OpenHost-Is-Owner)
+#          → container :9090   (auth_proxy.py — auto-login sidecar)
+#          → 127.0.0.1:9001    (MinIO console)
 #
 #   S3 client (aws-cli, rclone, mc, etc.) →
 #          host_port 9106 (from openhost.toml [[ports]])
-#          → container :9000  (MinIO S3 API)
+#          → container :9000   (MinIO S3 API)
 #
-# The console is private (router redirects unauthenticated visitors
-# to /login on the parent zone).  The S3 API is gated by MinIO's
-# native access-key auth, which is the right primitive for non-
-# browser clients — `aws s3 cp` cannot do an SSO redirect dance.
+# The console flow has THREE auth gates layered:
+#
+#   1. OpenHost router: anonymous visitors get 302'd to /login,
+#      so we never see them.  Owners arrive with the
+#      X-OpenHost-Is-Owner: true header stamped.
+#   2. auth_proxy.py: if owner has no MinIO session yet, calls
+#      MinIO's /api/v1/login with the root creds and sets the
+#      session cookie via 302.
+#   3. MinIO itself: authenticates every request via the session
+#      cookie.  We never disable this — even if the auth-proxy
+#      is bypassed somehow, MinIO still requires its own session.
+#
+# The S3 API is gated by MinIO's native access-key auth, which is
+# the right primitive for non-browser clients — `aws s3 cp` cannot
+# do an SSO redirect dance.  Per-client access keys are generated
+# from inside the console after the operator signs in.
 #
 # We use bash specifically (not /bin/sh) because we want associative
 # arrays and the `[[ ... ]]` test syntax for cleaner first-boot
@@ -162,9 +176,66 @@ export MINIO_BROWSER_REDIRECT_URL="https://${APP_NAME}.${ZONE_DOMAIN}"
 # --config-dir / --certs-dir  — operator-controlled persistent
 #                               state per the dirs above.
 
-echo "[start.sh] Starting MinIO server (data=$DATA_DIR, console=:9001, api=:9000)"
-exec minio server "$DATA_DIR" \
+echo "[start.sh] Starting MinIO server (data=$DATA_DIR, console=127.0.0.1:9001, api=:9000)"
+minio server "$DATA_DIR" \
     --config-dir "$CONFIG_DIR" \
     --certs-dir "$CERTS_DIR" \
     --address ":9000" \
-    --console-address ":9001"
+    --console-address "127.0.0.1:9001" &
+MINIO_PID=$!
+
+# Wait for the console port to bind before starting the
+# auth-proxy.  The proxy will fail its first auto-login attempt
+# if MinIO isn't accepting yet, and the failure surfaces as a
+# bad-UX manual login form even though everything is otherwise
+# healthy.  Polling the port is more reliable than a fixed
+# sleep — under load the initial scan can take a few seconds.
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    if python3 -c "
+import socket, sys
+s = socket.socket()
+s.settimeout(0.5)
+sys.exit(0 if s.connect_ex(('127.0.0.1', 9001)) == 0 else 1)
+" 2>/dev/null; then
+        break
+    fi
+    if ! kill -0 "$MINIO_PID" 2>/dev/null; then
+        wait "$MINIO_PID" || true
+        echo "[start.sh] MinIO exited before binding the console port"
+        exit 1
+    fi
+    sleep 1
+done
+
+# -----------------------------------------------------------------
+# Launch auth-proxy sidecar
+# -----------------------------------------------------------------
+
+echo "[start.sh] Starting auth-proxy on 0.0.0.0:9090 -> 127.0.0.1:9001"
+export AUTH_PROXY_LISTEN_PORT="${AUTH_PROXY_LISTEN_PORT:-9090}"
+export AUTH_PROXY_UPSTREAM_HOST="127.0.0.1"
+export AUTH_PROXY_UPSTREAM_PORT="9001"
+export AUTH_PROXY_CRED_FILE="$CRED_FILE"
+python3 /opt/openhost-minio/auth_proxy.py &
+PROXY_PID=$!
+
+# -----------------------------------------------------------------
+# Supervision
+# -----------------------------------------------------------------
+#
+# Forward signals so a stop request reaches MinIO cleanly (it
+# flushes in-memory metadata to disk on SIGTERM).
+trap 'kill -TERM "$MINIO_PID" "$PROXY_PID" 2>/dev/null; wait' TERM INT
+
+# Block until either child exits, then tear down the survivor.
+# `wait -n` is bash-only; same pattern as openhost-syncthing's
+# start.sh.
+set +e
+wait -n "$MINIO_PID" "$PROXY_PID"
+EXIT_CODE=$?
+set -e
+
+echo "[start.sh] Child exited (code=$EXIT_CODE); shutting down"
+kill -TERM "$MINIO_PID" "$PROXY_PID" 2>/dev/null || true
+wait || true
+exit "$EXIT_CODE"

@@ -15,46 +15,46 @@ Use this when you want a generic blob backend on your zone that any S3 client (`
 After the app is deployed:
 
 ```sh
-# 1. Recover the root password from inside the container (run on the
-#    OpenHost host that's running this app):
-podman exec openhost-minio cat /data/app_data/minio/config/root-credentials.txt
-
-# Output (substitute your own zone path / instance prefix as needed):
-# export MINIO_ROOT_USER='openhost-XXXXXXXX'
-# export MINIO_ROOT_PASSWORD='YYYY...'
-
-# 2. Sign into the console.
+# 1. Sign into the console.
 open https://minio.<your-zone>/
-# OpenHost SSO will gate you first; once through, log in with the
-# user/password from step 1.
+# OpenHost SSO gates you first.  After SSO, the auth-proxy
+# auto-logs you into MinIO as root using the on-disk credentials —
+# you should land in the console with no second password prompt.
 
-# 3. Create an access key + secret for your laptop.
+# 2. Create an access key + secret for your laptop.
 # In the console: Identity → Access Keys → Create access key. Copy
 # both halves; the secret is only shown once.
 
-# 4. Point an S3 client at the API.  No TLS by default on the
+# 3. Point an S3 client at the API.  No TLS by default on the
 #    published port — the outer zone Caddy doesn't front this port.
 mc alias set zone http://<your-zone>:9106 <access-key> <secret>
 mc mb zone/backup
 mc cp -r /local/cryfs/ zone/backup/cryfs/
 ```
 
+If for some reason auto-login doesn't fire (auth-proxy down, credentials file missing, etc.), the worst-case UX is that you see MinIO's own login form. Recover the root credentials from the container:
+
+```sh
+podman exec openhost-minio cat /data/app_data/minio/config/root-credentials.txt
+```
+
+Then sign in manually. Once that succeeds, the cookie is set and subsequent visits work whether or not the auth-proxy auto-login path runs.
+
 The S3 API host port (`9106`) is set in `openhost.toml`'s `[[ports]]` block; if a different port is needed (e.g. it conflicts with another app on the host) the operator can override the `host_port` value before deploy.
 
-## How the SSO gate works
+## How auto-login works
 
-There is **no auth-proxy sidecar in this app**. Authentication is enforced one layer up by the OpenHost router itself: every request to `https://minio.<zone>/...` (the canonical subdomain form OpenHost uses for app URLs) is checked against the visitor's `zone_auth` cookie before the router decides whether to forward it to the container.
+When you visit `https://minio.<zone>/` after signing into OpenHost, you don't see MinIO's login form — you're dropped straight into the console as `root`. This works in three layers:
 
-- **No cookie / invalid cookie** → router 302-redirects to `https://<zone>/login`. After SSO completes the cookie is set on `Domain=<zone>` (valid for subdomains too); revisiting `https://minio.<zone>/` then routes through to MinIO's own login form.
-- **Valid owner cookie** → router forwards the request straight to MinIO's console on container port 9001.
+1. **OpenHost router** verifies your `zone_auth` cookie. If valid (`sub == "owner"`), it stamps `X-OpenHost-Is-Owner: true` on the request and forwards to the auth-proxy. If absent or invalid, it 302's you to OpenHost's `/login`.
+2. **`auth_proxy.py` sidecar** (container port 9090) reads `X-OpenHost-Is-Owner`. If true AND your browser doesn't yet have a MinIO `token` cookie, the proxy POSTs the on-disk root credentials to MinIO's `/api/v1/login` endpoint, captures the resulting `Set-Cookie`, and sends a 302 back to your original URL with the cookie attached. Subsequent requests carry the cookie and proxy through normally.
+3. **MinIO console** authenticates every request via its `token` cookie. We never disable MinIO's own auth — it's a defense-in-depth layer below the OpenHost gate.
 
-This pattern is simpler than what `openhost-syncthing` / `openhost-nextcloud` / `openhost-peertube` use, all of which run an auth-proxy sidecar. The sidecar is unnecessary here because:
+This mirrors the pattern used in `openhost-plane.so`'s `openhost_auth.py`: the OpenHost router stamps a per-request owner-trust header, and the app's sidecar uses it as the trigger to mint an in-app session. The difference is that MinIO has a documented `/api/v1/login` endpoint that mints sessions for us, so we don't need to forge anything by hand.
 
-- MinIO has its own login UI (so a 403 on missing cookie would be a worse UX than letting the OpenHost router do its standard login redirect).
-- MinIO's S3 API lives on a different port (the `[[ports]]` mapping below), so we don't have nextcloud's "native sync clients sharing the browser port" problem.
-- MinIO doesn't federate, so we don't have peertube's "anonymous viewers must reach the browser port" problem.
+**Anyone other than the zone owner who tries to reach the console gets 302'd to OpenHost login at the router layer; they never reach the auth-proxy.** The sidecar additionally strips any client-supplied `X-OpenHost-Is-Owner` / `X-OpenHost-User` headers as defense-in-depth, in case a future router bug or path misconfiguration ever lets an unverified value through.
 
-The S3 API on container port `9000` (host port `9106`) is reachable directly without going through the OpenHost router. It uses MinIO's own access-key auth, which is the right primitive for non-browser clients — `aws s3 cp` cannot do an OpenHost SSO redirect dance.
+The S3 API on container port `9000` (host port `9106`) is reachable directly without going through the auth-proxy. It uses MinIO's own access-key auth — the right primitive for non-browser clients, since `aws s3 cp` cannot do an SSO redirect dance.
 
 ## First-boot credentials
 
@@ -73,12 +73,14 @@ You can also override at deploy time via env vars: if `MINIO_ROOT_USER` / `MINIO
 
 | Env var                   | Purpose                                                      | Default                                       |
 | ------------------------- | ------------------------------------------------------------ | --------------------------------------------- |
-| `OPENHOST_APP_DATA_DIR`   | Persistent data dir; injected by compute_space at boot.      | `/data/app_data/minio`                        |
-| `OPENHOST_ZONE_DOMAIN`    | Zone domain; injected. Used to derive `MINIO_BROWSER_REDIRECT_URL` and `MINIO_SERVER_URL`. | `localhost`                                   |
-| `OPENHOST_APP_NAME`       | App name; injected. Forms the canonical console URL `https://<app-name>.<zone-domain>/`. | `minio`                                       |
-| `MINIO_ROOT_USER`         | Override the auto-generated root user.                       | auto                                          |
-| `MINIO_ROOT_PASSWORD`     | Override the auto-generated root password.                   | auto                                          |
-| `MINIO_S3_API_HOST_PORT`  | Used to compose `MINIO_SERVER_URL`. Should match the host port mapped to container 9000 in `openhost.toml`. | `9106`                                        |
+| `OPENHOST_APP_DATA_DIR`     | Persistent data dir; injected by compute_space at boot.      | `/data/app_data/minio`                        |
+| `OPENHOST_ZONE_DOMAIN`      | Zone domain; injected. Used to derive `MINIO_BROWSER_REDIRECT_URL`. | `localhost`                                   |
+| `OPENHOST_APP_NAME`         | App name; injected. Forms the canonical console URL `https://<app-name>.<zone-domain>/`. | `minio`                                       |
+| `MINIO_ROOT_USER`           | Override the auto-generated root user.                       | auto                                          |
+| `MINIO_ROOT_PASSWORD`       | Override the auto-generated root password.                   | auto                                          |
+| `AUTH_PROXY_LISTEN_PORT`    | Port the auth-proxy sidecar listens on.                      | `9090`                                        |
+| `AUTH_PROXY_UPSTREAM_PORT`  | Port MinIO's console binds (loopback inside container).      | `9001`                                        |
+| `AUTH_PROXY_CRED_FILE`      | Path to start.sh's persisted root credentials file.          | `$OPENHOST_APP_DATA_DIR/config/root-credentials.txt` |
 
 In a default deploy you don't have to set any of these; sensible values come out of `start.sh` and `openhost.toml`.
 
@@ -91,10 +93,10 @@ In a default deploy you don't have to set any of these; sensible values come out
 
 ## Troubleshooting
 
-- **Console redirects to `http://127.0.0.1` and breaks**: `MINIO_BROWSER_REDIRECT_URL` did not get set correctly. Check that `OPENHOST_ZONE_DOMAIN` is in the container's environment and that `start.sh` set the export.
+- **You see MinIO's login form instead of being auto-logged in**: the auth-proxy didn't manage to mint a session. Check `podman logs openhost-minio` for `auto-login:` lines. Common causes: credentials file missing or unreadable (`/data/app_data/minio/config/root-credentials.txt` inside the container), MinIO not yet ready when the visit landed (wait ten seconds and retry), or upstream MinIO returning a non-2xx to `/api/v1/login` (which would indicate an internal MinIO problem). The fall-through behavior is intentional — manual login from the form using the on-disk credentials always works as a backup.
+- **Auto-login redirect loop**: the browser keeps following 302's back to `/`. Almost always means MinIO's `/api/v1/login` returned a 2xx but the cookie didn't get set on the browser (cookie-domain mismatch, `Secure` flag while accessed over HTTP, etc.). Inspect the `Set-Cookie` header on the redirect response in dev tools.
 - **`mc` / `aws s3` connection refused on the API port**: confirm the `[[ports]]` entry in `openhost.toml` actually published the host port. `oh app status minio` from the operator side should show the mapping. The S3 API URL is `http://<zone>:9106` (no TLS by default).
-- **Stuck at the OpenHost login page when visiting `https://minio.<zone>/`**: sign in to OpenHost first, then revisit. The router 302's unauthenticated visitors to `/login`; coming back to `https://minio.<zone>/` after the cookie is set should land you at MinIO's own login form.
-- **403 on `/manifest.json` or other SPA self-fetches**: confirms `MINIO_BROWSER_REDIRECT_URL` is set to the wrong URL. The SPA loads from the URL the operator's browser is on (e.g. `https://minio.<zone>/`), and emits self-fetch URLs based on what `MINIO_BROWSER_REDIRECT_URL` was set to at startup. They must match. `start.sh` derives the correct URL from `OPENHOST_APP_NAME` + `OPENHOST_ZONE_DOMAIN`; if you've overridden either env var, make sure both still produce the canonical subdomain.
+- **403 on `/manifest.json` or other SPA self-fetches**: this used to be caused by `MINIO_BROWSER_REDIRECT_URL` being set to a different URL than the browser was on. `start.sh` now derives it from `OPENHOST_APP_NAME` + `OPENHOST_ZONE_DOMAIN` to match the canonical subdomain — if you override either env var, make sure both still produce the URL the browser will actually be on.
 
 ## Updating
 

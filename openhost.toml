@@ -5,39 +5,29 @@ description = "MinIO S3-compatible object storage on OpenHost. The web console i
 
 [runtime.container]
 image = "Dockerfile"
-# Container port 9001 is MinIO's web console.  The OpenHost router
-# routes browser traffic from minio.<zone-domain> (the canonical
-# subdomain form) to this port and gates the request itself:
-# visitors without a valid zone_auth cookie get a 302 redirect
-# to /login on the parent domain, then come back and hit MinIO's
-# own login page after they've SSO'd through OpenHost.  (The
-# router also accepts the path-prefixed form
-# <zone-domain>/minio/ for compatibility, but the dashboard
-# links to the subdomain.)
+# Container port 9090 is the auth-proxy sidecar.  It listens here
+# and reverse-proxies the SSO-gated console traffic to MinIO's
+# console upstream on 127.0.0.1:9001.  This is the port the
+# OpenHost router routes browser traffic to (via the canonical
+# subdomain form minio.<zone-domain>; path-prefixed
+# <zone-domain>/minio/ also works but the dashboard links the
+# subdomain).
 #
-# Why no auth-proxy sidecar?  Three apps in the OpenHost catalog
-# illustrate three different patterns:
+# What the auth-proxy does: when an SSO-verified zone owner
+# (X-OpenHost-Is-Owner: true, stamped by the OpenHost router on
+# JWT-verified requests) hits the console without a MinIO session
+# cookie yet, the proxy logs them in to MinIO automatically using
+# the on-disk root credentials and 302s the browser back with the
+# cookie set.  Subsequent requests carry the cookie and pass
+# through normally.  This mirrors the openhost-plane.so pattern:
+# trust the OpenHost router's owner-stamping and use it to mint
+# an in-app session, so the operator only signs into OpenHost
+# (never into MinIO directly).
 #
-#   * openhost-syncthing — owner-only daemon with no own login
-#     page, so its sidecar 403s non-owners (no useful "sign in
-#     with OpenHost" UI exists upstream).
-#   * openhost-nextcloud — needs public_paths=["/"] for native
-#     sync clients (WebDAV/OCS) that share the same port as the
-#     browser console; sidecar gates SELECTIVELY and stamps an
-#     X-Openhost-User header so user_saml in env-var mode
-#     auto-creates accounts.
-#   * openhost-peertube — federation requires public access on
-#     the browser port; sidecar bounces only authenticated owners
-#     into a plugin SSO route, leaves anonymous viewers alone.
-#
-# MinIO doesn't fit any of those.  The console has its own login
-# UI (so 403 is a worse UX than letting the user see the form);
-# there's no native-sync-on-the-same-port concern (S3 lives on
-# the separate published port below); and there's no federation
-# surface.  The cleanest model is just "router gates everything,
-# MinIO handles its own login afterwards" — no sidecar to
-# maintain.
-port = 9001
+# The upstream router's behaviour for non-owner requests still
+# applies — visitors without zone_auth get 302'd to /login by the
+# router before they ever reach our auth-proxy.
+port = 9090
 
 # S3 API on TCP/9000 inside the container.  Published to host port
 # 9106 so external clients reach it as
