@@ -35,6 +35,7 @@ FROM minio/minio:latest AS minio-source
 # crun is too old to handle newer image OCI metadata).  Keeping
 # the build to pure file copies sidesteps that issue and the image
 # still has everything we need at runtime.
+FROM python:3.13-slim
 
 # -- minio + mc -------------------------------------------------
 # Statically-linked Go binaries; they don't depend on RHEL libs.
