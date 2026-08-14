@@ -1,7 +1,7 @@
 [app]
 name = "minio"
 version = "0.1.0"
-description = "MinIO S3-compatible object storage on OpenHost. The web console is gated by zone-owner SSO; the S3 API is exposed on a published host port and uses MinIO's native access-key auth (so any S3 client — aws-cli, rclone, mc, language SDKs — can talk to it without SSO)."
+description = "MinIO S3-compatible object storage on Cloud in a Bottle. The web console is gated by zone-owner SSO; the S3 API is exposed on a published host port and uses MinIO's native access-key auth (so any S3 client — aws-cli, rclone, mc, language SDKs — can talk to it without SSO)."
 
 [runtime.container]
 image = "Dockerfile"
