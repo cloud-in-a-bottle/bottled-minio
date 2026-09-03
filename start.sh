@@ -71,19 +71,24 @@ mkdir -p "$DATA_DIR" "$CONFIG_DIR" "$CERTS_DIR"
 # can override and the on-disk file is ignored.
 CRED_FILE="$CONFIG_DIR/root-credentials.txt"
 
+# When running under OpenHost, prefer operator-managed root credentials from
+# the secrets service by loading them into the env up front — treated exactly
+# like operator-supplied MINIO_ROOT_USER/PASSWORD env vars (machine-to-machine,
+# at boot; see fetch_secrets.py and the [[services.v2.consumes]] grant in
+# openhost.toml).  If the operator hasn't stored/granted them (or the service
+# is absent), nothing is set here and we fall through to the on-disk file /
+# first-boot generation below, so a standalone MinIO still works.
+if [[ -z "${MINIO_ROOT_USER:-}" || -z "${MINIO_ROOT_PASSWORD:-}" ]] \
+    && [[ -n "${OPENHOST_APP_TOKEN:-}" && -n "${OPENHOST_ROUTER_URL:-}" ]] \
+    && creds_env="$(python3 /opt/openhost-minio/fetch_secrets.py 2>/dev/null)" \
+    && [[ -n "$creds_env" ]]; then
+    # shellcheck disable=SC1090  # eval of `export KEY='value'` lines
+    eval "$creds_env"
+    echo "[start.sh] Loaded MinIO root credentials from the OpenHost secrets service"
+fi
+
 if [[ -z "${MINIO_ROOT_USER:-}" || -z "${MINIO_ROOT_PASSWORD:-}" ]]; then
-    # Preferred: fetch operator-managed root credentials from the OpenHost
-    # secrets service (machine-to-machine, at boot — see fetch_secrets.py and
-    # the [[services.v2.consumes]] grant in openhost.toml).  Any failure falls
-    # through to the on-disk file / first-boot generation below, so a
-    # standalone MinIO (no secrets service) still boots.
-    if [[ -n "${OPENHOST_APP_TOKEN:-}" && -n "${OPENHOST_ROUTER_URL:-}" ]] \
-        && creds_env="$(python3 /opt/openhost-minio/fetch_secrets.py 2>/dev/null)" \
-        && [[ -n "$creds_env" ]]; then
-        # shellcheck disable=SC1090  # eval of `export KEY='value'` lines
-        eval "$creds_env"
-        echo "[start.sh] Loaded MinIO root credentials from the OpenHost secrets service"
-    elif [[ -f "$CRED_FILE" ]]; then
+    if [[ -f "$CRED_FILE" ]]; then
         # shellcheck disable=SC1090
         source "$CRED_FILE"
     else
