@@ -60,6 +60,22 @@ health_check = "/minio/health/live"
 # (<zone-domain>/minio).
 public_paths = []
 
+# Root credentials are provisioned by the OpenHost secrets service when it
+# is available: on boot, start.sh fetches MINIO_ROOT_USER / MINIO_ROOT_PASSWORD
+# from the secrets app via this grant (machine-to-machine, no browser).  This
+# lets an operator (or the e2e suite) choose the credentials up front instead
+# of reading them back out of the container afterwards.  When the service is
+# not present the app falls back to the on-disk file / first-boot generation,
+# so a standalone MinIO still works.
+[[services.v2.consumes]]
+service = "github.com/imbue-openhost/openhost/services/secrets"
+shortname = "secrets"
+version = ">=0.1.0"
+grants = [
+    { key = "MINIO_ROOT_USER" },
+    { key = "MINIO_ROOT_PASSWORD" },
+]
+
 [resources]
 # MinIO's RSS at idle is ~80 MiB; under load with several parallel
 # uploads a single instance hovers around 200-300 MiB.  The auth

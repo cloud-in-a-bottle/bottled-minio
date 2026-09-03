@@ -57,8 +57,9 @@ COPY --from=minio-source /usr/bin/mc /usr/bin/mc
 # `git ls-files --stage`).  Buildah/podman preserves the git index
 # mode through COPY, so no `RUN chmod +x` is needed — important
 # for the same crun-portability reason.
-COPY auth_proxy.py /opt/openhost-minio/auth_proxy.py
-COPY start.sh      /opt/openhost-minio/start.sh
+COPY auth_proxy.py     /opt/openhost-minio/auth_proxy.py
+COPY start.sh          /opt/openhost-minio/start.sh
+COPY fetch_secrets.py  /opt/openhost-minio/fetch_secrets.py
 
 # -- runtime ---------------------------------------------------
 # 9090 = auth-proxy (the openhost.toml `port`, gated by the
