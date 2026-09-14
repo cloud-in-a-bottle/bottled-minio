@@ -1,0 +1,22 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build from fresh base images
+        run: docker build --pull --no-cache --tag bottled-minio-ci .
+      - name: Verify MinIO and client binaries
+        run: |
+          docker run --rm --entrypoint /usr/bin/minio bottled-minio-ci --version
+          docker run --rm --entrypoint /usr/bin/mc bottled-minio-ci --version
