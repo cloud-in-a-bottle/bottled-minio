@@ -100,4 +100,4 @@ In a default deploy you don't have to set any of these; sensible values come out
 
 ## Updating
 
-Standard Cloud in a Bottle reload-with-update flow rebuilds the image (which pulls the latest `minio/minio` from upstream) and restarts the container. Object data on disk is preserved across rebuilds.
+Standard Cloud in a Bottle reload-with-update flow rebuilds the image using the `quay.io/minio/minio` release and multi-platform digest pinned in `Dockerfile` and restarts the container. To upgrade MinIO, update that tag and digest before rebuilding. Object data on disk is preserved across rebuilds.
