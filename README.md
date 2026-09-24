@@ -100,4 +100,6 @@ In a default deploy you don't have to set any of these; sensible values come out
 
 ## Updating
 
-Standard Cloud in a Bottle reload-with-update flow rebuilds the image using the `quay.io/minio/minio` release and multi-platform digest pinned in `Dockerfile` and restarts the container. To upgrade MinIO, update that tag and digest before rebuilding. Object data on disk is preserved across rebuilds.
+Standard Cloud in a Bottle reload-with-update flow rebuilds the image using the official MinIO and mc GitHub release binaries pinned by SHA-256 in `Dockerfile` and restarts the container. Linux amd64 and arm64 are supported. To change versions, update the release URLs and checksums for both architectures before rebuilding. Object data on disk is preserved across rebuilds.
+
+Building requires Docker BuildKit or Podman 5.8 (the Cloud in a Bottle runtime) for checksum-verified downloads.
