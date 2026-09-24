@@ -17,11 +17,19 @@ jobs:
         engine: [docker, podman]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
+    env:
+      CONTAINER_ENGINE: ${{ matrix.engine == 'podman' && 'pixi exec --spec podman~=5.8 --spec crun -- podman' || 'docker' }}
     steps:
       - uses: actions/checkout@v4
+      - name: Install Pixi for the Cloud in a Bottle container runtime
+        if: matrix.engine == 'podman'
+        uses: prefix-dev/setup-pixi@v0.8.10
+        with:
+          pixi-version: v0.70.2
+          run-install: false
       - name: Build from fresh base images
-        run: ${{ matrix.engine }} build --pull --no-cache --tag bottled-minio-ci .
+        run: $CONTAINER_ENGINE build --pull --no-cache --tag bottled-minio-ci .
       - name: Verify MinIO and client binaries
         run: |
-          ${{ matrix.engine }} run --rm --entrypoint /usr/bin/minio bottled-minio-ci --version
-          ${{ matrix.engine }} run --rm --entrypoint /usr/bin/mc bottled-minio-ci --version
+          $CONTAINER_ENGINE run --rm --entrypoint /usr/bin/minio bottled-minio-ci --version
+          $CONTAINER_ENGINE run --rm --entrypoint /usr/bin/mc bottled-minio-ci --version
