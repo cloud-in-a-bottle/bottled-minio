@@ -27,9 +27,13 @@ jobs:
         with:
           pixi-version: v0.70.2
           run-install: false
-      - name: Allow the rootless Podman runtime
+      - name: Configure the rootless Podman runtime
         if: matrix.engine == 'podman'
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        run: |
+          sudo apt-get update
+          sudo apt-get remove -y --purge podman crun
+          sudo apt-get install -y uidmap passt
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Build from fresh base images
         run: $CONTAINER_ENGINE build --pull --no-cache --tag bottled-minio-ci .
       - name: Verify MinIO and client binaries
