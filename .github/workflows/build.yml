@@ -10,13 +10,18 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        engine: [docker, podman]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Build from fresh base images
-        run: docker build --pull --no-cache --tag bottled-minio-ci .
+        run: ${{ matrix.engine }} build --pull --no-cache --tag bottled-minio-ci .
       - name: Verify MinIO and client binaries
         run: |
-          docker run --rm --entrypoint /usr/bin/minio bottled-minio-ci --version
-          docker run --rm --entrypoint /usr/bin/mc bottled-minio-ci --version
+          ${{ matrix.engine }} run --rm --entrypoint /usr/bin/minio bottled-minio-ci --version
+          ${{ matrix.engine }} run --rm --entrypoint /usr/bin/mc bottled-minio-ci --version
