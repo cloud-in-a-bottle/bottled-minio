@@ -27,14 +27,19 @@
 # request after JWT verification) and use it as the trigger to
 # mint an in-app session.
 #
-# We can't use the upstream minio/minio image as the runtime base
-# for the proxy: that image is a stripped RHEL UBI 9 micro with
-# no Python.  Use a multi-stage build to pull just the minio + mc
-# binaries from upstream and run them on python:3.13-slim, which
-# has the rest of the toolchain we need.
+# The official release binaries are archived on GitHub. Each architecture
+# uses immutable checksums, and ADD preserves executable modes without RUN.
+ARG TARGETARCH
 
-# Stage 1: pull the official MinIO binaries.
-FROM quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e AS minio-source
+FROM scratch AS minio-amd64
+ADD --checksum=sha256:7c5bd8512c6e966455b1d198209358b2d191c77a83ab377c4073281065fb855f --chmod=755 https://github.com/minio/minio/releases/download/RELEASE.2025-09-07T16-13-09Z/minio.linux-amd64.RELEASE.2025-09-07T16-13-09Z /usr/bin/minio
+ADD --checksum=sha256:01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891 --chmod=755 https://github.com/minio/mc/releases/download/RELEASE.2025-08-13T08-35-41Z/mc.linux-amd64.RELEASE.2025-08-13T08-35-41Z /usr/bin/mc
+
+FROM scratch AS minio-arm64
+ADD --checksum=sha256:5c83cd2cf151717ba0243f73e1c7802ff36e272b67144bdd7f1f7d684fd6f03d --chmod=755 https://github.com/minio/minio/releases/download/RELEASE.2025-09-07T16-13-09Z/minio.linux-arm64.RELEASE.2025-09-07T16-13-09Z /usr/bin/minio
+ADD --checksum=sha256:14c8c9616cfce4636add161304353244e8de383b2e2752c0e9dad01d4c27c12c --chmod=755 https://github.com/minio/mc/releases/download/RELEASE.2025-08-13T08-35-41Z/mc.linux-arm64.RELEASE.2025-08-13T08-35-41Z /usr/bin/mc
+
+FROM minio-${TARGETARCH} AS minio-source
 
 # Stage 2: build the runtime image.
 #
@@ -48,7 +53,7 @@ FROM quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f5
 FROM python:3.13-slim
 
 # -- minio + mc -------------------------------------------------
-# Statically-linked Go binaries; they don't depend on RHEL libs.
+# Statically-linked Go binaries.
 COPY --from=minio-source /usr/bin/minio /usr/bin/minio
 COPY --from=minio-source /usr/bin/mc /usr/bin/mc
 
