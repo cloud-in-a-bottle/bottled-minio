@@ -18,7 +18,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     env:
-      CONTAINER_ENGINE: ${{ matrix.engine == 'podman' && 'pixi exec --spec podman~=5.8 --spec crun -- podman' || 'docker' }}
+      # conda-forge crun is built without systemd support.
+      CONTAINER_ENGINE: ${{ matrix.engine == 'podman' && 'pixi exec --spec podman~=5.8 --spec crun -- podman --runtime=crun --cgroup-manager=cgroupfs' || 'docker' }}
     steps:
       - uses: actions/checkout@v4
       - name: Install Pixi for the Cloud in a Bottle container runtime
@@ -34,6 +35,12 @@ jobs:
           sudo apt-get remove -y --purge podman crun
           sudo apt-get install -y uidmap passt
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Verify rootless Podman configuration
+        if: matrix.engine == 'podman'
+        run: |
+          config="$($CONTAINER_ENGINE info --format '{{.Host.Security.Rootless}} {{.Host.CgroupManager}} {{.Host.OCIRuntime.Name}}')"
+          printf '%s\n' "$config"
+          test "$config" = 'true cgroupfs crun'
       - name: Build from fresh base images
         run: $CONTAINER_ENGINE build --pull --no-cache --tag bottled-minio-ci .
       - name: Verify MinIO and client binaries
